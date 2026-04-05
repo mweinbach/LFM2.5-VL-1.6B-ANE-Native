@@ -5,6 +5,7 @@ struct CLIArguments {
     var bundleRoot: URL
     var prompt: String
     var systemPrompt: String?
+    var imageURLs: [URL] = []
     var maxNewTokens: Int = 128
     var temperature: Float = 0
     var topK: Int = 40
@@ -19,6 +20,7 @@ func parseArguments() throws -> CLIArguments {
     var bundleRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     var prompt: String?
     var systemPrompt: String?
+    var imageURLs: [URL] = []
     var maxNewTokens = 128
     var temperature: Float = 0
     var topK = 40
@@ -37,6 +39,9 @@ func parseArguments() throws -> CLIArguments {
         case "--system":
             index += 1
             systemPrompt = args[index]
+        case "--image":
+            index += 1
+            imageURLs.append(URL(fileURLWithPath: args[index]))
         case "--max-new-tokens":
             index += 1
             guard let value = Int(args[index]) else { throw CLIError.invalidValue(arg) }
@@ -50,7 +55,7 @@ func parseArguments() throws -> CLIArguments {
             guard let value = Int(args[index]) else { throw CLIError.invalidValue(arg) }
             topK = value
         case "--help", "-h":
-            print("Usage: swift run ANEInferenceCLI --prompt \"Hello\" [--system \"You are helpful\"] [--bundle-root /path/to/ANE_Native] [--max-new-tokens 128] [--temperature 0] [--top-k 40]")
+            print("Usage: swift run ANEInferenceCLI --prompt \"Hello\" [--system \"You are helpful\"] [--image /path/to/image.png]... [--bundle-root /path/to/ANE_Native] [--max-new-tokens 128] [--temperature 0] [--top-k 40]")
             Foundation.exit(0)
         default:
             throw CLIError.invalidValue(arg)
@@ -66,6 +71,7 @@ func parseArguments() throws -> CLIArguments {
         bundleRoot: bundleRoot,
         prompt: prompt,
         systemPrompt: systemPrompt,
+        imageURLs: imageURLs,
         maxNewTokens: maxNewTokens,
         temperature: temperature,
         topK: topK
@@ -83,7 +89,9 @@ struct ANEInferenceCLI {
             if let systemPrompt = arguments.systemPrompt {
                 messages.append(ChatMessage(role: "system", content: [.text(systemPrompt)]))
             }
-            messages.append(ChatMessage(role: "user", content: [.text(arguments.prompt)]))
+            var userContent: [ChatContent] = arguments.imageURLs.map(ChatContent.image)
+            userContent.append(.text(arguments.prompt))
+            messages.append(ChatMessage(role: "user", content: userContent))
             let output = try await pipeline.generate(
                 messages: messages,
                 config: GenerationConfig(

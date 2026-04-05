@@ -26,7 +26,7 @@ swift build
 
 First download the CoreML bundle from Hugging Face so you have a local folder containing `CoreMLModels/`, `tokenizer.json`, `tokenizer_config.json`, `config.json`, `processor_config.json`, `generation_config.json`, and `chat_template.jinja`.
 
-Then run:
+Text-only example:
 
 ```bash
 swift run ANEInferenceCLI \
@@ -35,15 +35,27 @@ swift run ANEInferenceCLI \
   --max-new-tokens 64
 ```
 
+Multimodal example:
+
+```bash
+swift run ANEInferenceCLI \
+  --bundle-root /path/to/LFM2.5-VL-1.6B-CoreML \
+  --image /path/to/image.png \
+  --prompt "Describe the image briefly." \
+  --max-new-tokens 64
+```
+
 Optional flags:
 
 - `--system "..."`
+- `--image /path/to/another-image.png` (repeatable)
 - `--temperature 0.0`
 - `--top-k 40`
 
 ## Notes
 
-- The current runtime is text-only.
+- Supports text-only and multimodal prompts, including multi-image inputs and the model's tiling/thumbnail preprocessing path.
+- The vision path uses split CoreML models for patch embedding, encoder, and projector, plus shipped positional embeddings.
 - The prompt formatter follows the shipped ChatML-style template from the original model assets.
 - The CoreML export is fixed to a 4096-token context window.
 

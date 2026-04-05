@@ -23,6 +23,7 @@ public enum LFM2PipelineError: Error {
 public final class LFM2Pipeline {
     public let bundle: LFM2ModelBundle
 
+    private let visionProcessor: LFM2VisionProcessor
     private var convCaches: [MLMultiArray] = []
     private var kCaches: [MLMultiArray] = []
     private var vCaches: [MLMultiArray] = []
@@ -31,6 +32,7 @@ public final class LFM2Pipeline {
 
     public init(bundle: LFM2ModelBundle) throws {
         self.bundle = bundle
+        self.visionProcessor = LFM2VisionProcessor(metadata: bundle.metadata)
         try reset()
     }
 
@@ -58,21 +60,18 @@ public final class LFM2Pipeline {
         if messages.isEmpty {
             throw LFM2PipelineError.emptyPrompt
         }
-        if messages.contains(where: { $0.content.contains(.imagePlaceholder) }) {
-            throw LFM2PipelineError.unsupportedImages
-        }
 
         try reset()
-        let rendered = try ChatFormatter.render(messages: messages, addGenerationPrompt: true)
-        var promptTokens = bundle.tokenizer.encode(text: rendered, addSpecialTokens: false)
+        let prepared = try visionProcessor.prepare(messages: messages, bundle: bundle)
+        let promptTokens = bundle.tokenizer.encode(text: prepared.renderedPrompt, addSpecialTokens: false)
         if promptTokens.count >= bundle.metadata.contextLength {
-            promptTokens = Array(promptTokens.suffix(bundle.metadata.contextLength - 1))
+            throw LFM2PipelineError.contextLimitExceeded(limit: bundle.metadata.contextLength)
         }
         guard !promptTokens.isEmpty else {
             throw LFM2PipelineError.emptyPrompt
         }
 
-        try prefill(tokens: promptTokens)
+        try prefill(tokens: promptTokens, imageEmbeddings: prepared.projectedImageEmbeddings)
 
         var generatedTokenIDs: [Int] = []
         var nextToken = try nextTokenFromCurrentState(config: config)
@@ -92,40 +91,57 @@ public final class LFM2Pipeline {
         return bundle.tokenizer.decode(tokens: generatedTokenIDs, skipSpecialTokens: true)
     }
 
-    private func prefill(tokens: [Int]) throws {
+    private func prefill(tokens: [Int], imageEmbeddings: [Float]) throws {
         var offset = 0
+        var imageCursor = 0
+        while offset + bundle.metadata.prefillLength <= tokens.count {
+            let block = Array(tokens[offset..<(offset + bundle.metadata.prefillLength)])
+            let hiddenStates = try embeddedPromptBlock(tokenIDs: block, imageEmbeddings: imageEmbeddings, imageCursor: &imageCursor)
+            try runPrefillBlock(hiddenStates, startPosition: offset)
+            offset += bundle.metadata.prefillLength
+        }
+
         while offset < tokens.count {
-            let remaining = tokens.count - offset
-            if remaining >= bundle.metadata.prefillLength {
-                let block = Array(tokens[offset..<(offset + bundle.metadata.prefillLength)])
-                try runPrefillBlock(block, startPosition: offset)
-                offset += bundle.metadata.prefillLength
-            } else {
-                for token in tokens[offset...] {
-                    try decode(tokenID: token)
-                }
-                offset = tokens.count
-            }
+            let token = tokens[offset]
+            let hiddenStates = try embeddedPromptBlock(tokenIDs: [token], imageEmbeddings: imageEmbeddings, imageCursor: &imageCursor)
+            try runDecodeStep(hiddenStates)
+            offset += 1
         }
     }
 
-    private func runPrefillBlock(_ tokenIDs: [Int], startPosition: Int) throws {
+    private func embeddedPromptBlock(tokenIDs: [Int], imageEmbeddings: [Float], imageCursor: inout Int) throws -> MLMultiArray {
         let embeddingsOutput = try predict(
             model: bundle.embeddingsModel,
             inputs: ["input_ids": try TensorHelpers.makeInt32Array(shape: [1, tokenIDs.count], values: tokenIDs)]
         )
         let hiddenStates = try multiArray(embeddingsOutput, name: "embeddings")
+        guard !imageEmbeddings.isEmpty else {
+            return hiddenStates
+        }
+        var flattened = TensorHelpers.flatten(hiddenStates)
+        for (position, tokenID) in tokenIDs.enumerated() where tokenID == bundle.metadata.imageTokenId {
+            let start = position * bundle.metadata.hiddenSize
+            let end = start + bundle.metadata.hiddenSize
+            let imageEnd = imageCursor + bundle.metadata.hiddenSize
+            flattened.replaceSubrange(start..<end, with: imageEmbeddings[imageCursor..<imageEnd])
+            imageCursor = imageEnd
+        }
+        return try TensorHelpers.makeFloat16Array(shape: [1, tokenIDs.count, bundle.metadata.hiddenSize], values: flattened)
+    }
+
+    private func runPrefillBlock(_ hiddenStates: MLMultiArray, startPosition: Int) throws {
+        let tokenCount = hiddenStates.shape[1].intValue
         let positionIDs = try TensorHelpers.makeInt32Array(
-            shape: [1, tokenIDs.count],
-            values: Array(startPosition..<(startPosition + tokenIDs.count))
+            shape: [1, tokenCount],
+            values: Array(startPosition..<(startPosition + tokenCount))
         )
         let causalMask = try TensorHelpers.makeFloat16Array(
-            shape: [tokenIDs.count, bundle.metadata.contextLength],
-            values: makeCausalMask(startPosition: startPosition, count: tokenIDs.count)
+            shape: [tokenCount, bundle.metadata.contextLength],
+            values: makeCausalMask(startPosition: startPosition, count: tokenCount)
         )
         let writeMask = try TensorHelpers.makeFloat16Array(
-            shape: [tokenIDs.count, bundle.metadata.contextLength],
-            values: makeWriteMask(startPosition: startPosition, count: tokenIDs.count)
+            shape: [tokenCount, bundle.metadata.contextLength],
+            values: makeWriteMask(startPosition: startPosition, count: tokenCount)
         )
 
         var currentHidden = hiddenStates
@@ -148,18 +164,22 @@ public final class LFM2Pipeline {
             vCaches[chunkIndex] = try multiArray(outputs, name: "v_cache_out")
         }
         lastLogits = try logits(from: currentHidden)
-        currentPosition = startPosition + tokenIDs.count
+        currentPosition = startPosition + tokenCount
     }
 
     private func decode(tokenID: Int) throws {
-        guard currentPosition < bundle.metadata.contextLength else {
-            throw LFM2PipelineError.contextLimitExceeded(limit: bundle.metadata.contextLength)
-        }
         let embeddingsOutput = try predict(
             model: bundle.embeddingsModel,
             inputs: ["input_ids": try TensorHelpers.makeInt32Array(shape: [1, 1], values: [tokenID])]
         )
         let hiddenStates = try multiArray(embeddingsOutput, name: "embeddings")
+        try runDecodeStep(hiddenStates)
+    }
+
+    private func runDecodeStep(_ hiddenStates: MLMultiArray) throws {
+        guard currentPosition < bundle.metadata.contextLength else {
+            throw LFM2PipelineError.contextLimitExceeded(limit: bundle.metadata.contextLength)
+        }
         let positionIDs = try TensorHelpers.makeInt32Array(shape: [1, 1], values: [currentPosition])
         let causalMask = try TensorHelpers.makeFloat16Array(
             shape: [1, bundle.metadata.contextLength],

@@ -2,6 +2,7 @@ import Foundation
 
 public enum ChatContent: Sendable, Hashable {
     case text(String)
+    case image(URL)
     case imagePlaceholder
 }
 
@@ -48,7 +49,7 @@ public enum ChatFormatter {
         switch content {
         case let .text(text):
             return text
-        case .imagePlaceholder:
+        case .image, .imagePlaceholder:
             return "<image>"
         }
     }

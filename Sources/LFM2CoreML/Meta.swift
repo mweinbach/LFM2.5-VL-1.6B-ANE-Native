@@ -24,6 +24,23 @@ public struct LFM2Metadata: Codable, Sendable {
     public let imageTokenId: Int
     public let imageStartTokenId: Int
     public let imageEndTokenId: Int
+    public let imageThumbnailTokenId: Int
+    public let tileSize: Int
+    public let encoderPatchSize: Int
+    public let downsampleFactor: Int
+    public let minTiles: Int
+    public let maxTiles: Int
+    public let useThumbnail: Bool
+    public let minImageTokens: Int
+    public let maxImageTokens: Int
+    public let maxNumPatches: Int
+    public let visionHiddenSize: Int
+    public let projectorHiddenSize: Int
+    public let visionPositionEmbeddingSize: Int
+    public let visionPatchEmbeddingModel: String
+    public let visionEncoderModel: String
+    public let visionProjectorModel: String
+    public let visionPositionEmbeddingsFile: String
     public let chunkOrder: [String]
     public let chunks: [LFM2ChunkMetadata]
     public let layerTypes: [String]
